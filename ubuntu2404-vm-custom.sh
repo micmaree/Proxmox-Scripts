@@ -280,6 +280,70 @@ function advanced_settings() {
     exit-script
   fi
 
+  # Scan network for available IPs
+  echo -e "${INFO}${YW}Scanning network for available IPs...${CL}"
+
+  # Get bridge IP and subnet
+  BRIDGE_IP=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+  BRIDGE_CIDR=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
+
+  if [ -z "$BRIDGE_IP" ]; then
+    echo -e "${CROSS}${RD}Could not detect network on bridge $BRG${CL}"
+    exit-script
+  fi
+
+  # Calculate network range
+  NETWORK_PREFIX=$(echo $BRIDGE_IP | cut -d'.' -f1-3)
+  GATEWAY=$(ip route | grep "default" | grep $BRG | awk '{print $3}')
+  [ -z "$GATEWAY" ] && GATEWAY="${NETWORK_PREFIX}.1"
+
+  # Scan IPs from .10 to .254 (avoid .1-9 for gateway/DNS)
+  AVAILABLE_IPS=()
+
+  for i in {10..254}; do
+    TEST_IP="${NETWORK_PREFIX}.${i}"
+
+    # Check if IP is already used by Proxmox VMs/CTs
+    USED_BY_VM=$(grep -rh "ip=" /etc/pve/qemu-server/*.conf 2>/dev/null | grep -c "$TEST_IP" || true)
+    USED_BY_CT=$(grep -rh "ip=" /etc/pve/lxc/*.conf 2>/dev/null | grep -c "$TEST_IP" || true)
+
+    # Quick ping check (timeout 0.5s)
+    if [ $USED_BY_VM -eq 0 ] && [ $USED_BY_CT -eq 0 ]; then
+      if ! ping -c 1 -W 1 $TEST_IP &>/dev/null; then
+        AVAILABLE_IPS+=("$TEST_IP" "Free" "OFF")
+      fi
+    fi
+
+    # Show progress every 50 IPs
+    if [ $((i % 50)) -eq 0 ]; then
+      echo -ne "${INFO}${YW}Scanned ${NETWORK_PREFIX}.${i}... Found: $((${#AVAILABLE_IPS[@]}/3))${CL}\r"
+    fi
+  done
+
+  echo -e "${CM}${GN}Found $((${#AVAILABLE_IPS[@]}/3)) available IPs in ${NETWORK_PREFIX}.0/${BRIDGE_CIDR}${CL}"
+
+  if [ ${#AVAILABLE_IPS[@]} -eq 0 ]; then
+    whiptail --backtitle "Proxmox VE Helper Scripts" --title "ERROR" --msgbox "No available IPs found in network ${NETWORK_PREFIX}.0/${BRIDGE_CIDR}" 10 58
+    exit-script
+  fi
+
+  # Show IP selection menu
+  SELECTED_IP=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT IP ADDRESS" --radiolist \
+    "Choose an IP address for VM:\n\nNetwork: ${NETWORK_PREFIX}.0/${BRIDGE_CIDR}\nGateway: ${GATEWAY}\n" \
+    20 60 10 \
+    "${AVAILABLE_IPS[@]}" 3>&1 1>&2 2>&3)
+
+  if [ -z "$SELECTED_IP" ]; then
+    exit-script
+  fi
+
+  VM_IP="$SELECTED_IP"
+  VM_GATEWAY="$GATEWAY"
+  VM_CIDR="$BRIDGE_CIDR"
+
+  echo -e "${GATEWAY}${BOLD}${DGN}IP Address: ${BGN}${VM_IP}/${VM_CIDR}${CL}"
+  echo -e "${GATEWAY}${BOLD}${DGN}Gateway: ${BGN}${VM_GATEWAY}${CL}"
+
   # Ask for Root Login
   if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "ROOT LOGIN" --yesno "Enable root login via SSH?" 10 58); then
     ENABLE_ROOT="yes"
@@ -329,13 +393,15 @@ function advanced_settings() {
   echo -e "${RAMSIZE}${BOLD}${DGN}RAM:             ${BGN}${RAM_GB}GB (${RAM_SIZE} MiB)${CL}"
   echo -e "${BRIDGE}${BOLD}${DGN}Bridge:          ${BGN}$BRG${CL}"
   echo -e "${MACADDRESS}${BOLD}${DGN}MAC Address:     ${BGN}$MAC${CL}"
+  echo -e "${GATEWAY}${BOLD}${DGN}IP Address:      ${BGN}${VM_IP}/${VM_CIDR}${CL}"
+  echo -e "${GATEWAY}${BOLD}${DGN}Gateway:         ${BGN}$VM_GATEWAY${CL}"
   echo -e "${VLANTAG}${BOLD}${DGN}VLAN:            ${BGN}Default${CL}"
   echo -e "${DEFAULT}${BOLD}${DGN}MTU:             ${BGN}Default${CL}"
   echo -e "${GATEWAY}${BOLD}${DGN}Start on Create: ${BGN}yes${CL}"
   if [ "$ENABLE_ROOT" = "yes" ]; then
-    echo -e "${OS}${BOLD}${DGN}Cloud-Init:      ${BGN}Enabled (DHCP + Root Login)${CL}"
+    echo -e "${OS}${BOLD}${DGN}Cloud-Init:      ${BGN}Enabled (Static IP + Root Login)${CL}"
   else
-    echo -e "${OS}${BOLD}${DGN}Cloud-Init:      ${BGN}Enabled (DHCP only)${CL}"
+    echo -e "${OS}${BOLD}${DGN}Cloud-Init:      ${BGN}Enabled (Static IP only)${CL}"
   fi
   echo -e "${BOLD}${YW}════════════════════════════════════════════════${CL}"
   echo ""
@@ -474,29 +540,30 @@ msg_ok "Created a Ubuntu 24.04 VM ${CL}${BL}(${HN})"
 
 # Configure Cloud-Init
 msg_info "Configuring Cloud-Init"
-qm set $VMID --ipconfig0 ip=dhcp >/dev/null
+qm set $VMID --ipconfig0 ip=${VM_IP}/${VM_CIDR},gw=${VM_GATEWAY} >/dev/null
+qm set $VMID --nameserver 8.8.8.8 >/dev/null
+qm set $VMID --searchdomain local >/dev/null
 
 if [ "$ENABLE_ROOT" = "yes" ]; then
   # Enable root login and set password
-  HASHED_PASS=$(openssl passwd -6 "$ROOT_PASS")
   qm set $VMID --ciuser root --cipassword "$ROOT_PASS" >/dev/null
-  qm set $VMID --sshkeys <(echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDummy") >/dev/null 2>&1 || true
-  msg_ok "Cloud-Init configured ${CL}${BL}(DHCP + Root Login)${CL}"
+  msg_ok "Cloud-Init configured ${CL}${BL}(Static IP ${VM_IP} + Root Login)${CL}"
 else
-  # DHCP only, no root login
+  # Static IP only, no root login
   qm set $VMID --ciuser ubuntu --cipassword "$(openssl rand -base64 32)" >/dev/null
-  msg_ok "Cloud-Init configured ${CL}${BL}(DHCP only)${CL}"
+  msg_ok "Cloud-Init configured ${CL}${BL}(Static IP ${VM_IP})${CL}"
 fi
 
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting Ubuntu 24.04 VM"
   qm start $VMID
   msg_ok "Started Ubuntu 24.04 VM"
-  echo -e "\n${INFO}${YW}VM is booting and getting IP via DHCP...${CL}"
+  echo -e "\n${INFO}${GN}VM is booting with Static IP: ${VM_IP}${CL}"
+  echo -e "${INFO}${GN}Gateway: ${VM_GATEWAY}${CL}"
   if [ "$ENABLE_ROOT" = "yes" ]; then
-    echo -e "${INFO}${GN}You can login as 'root' with the password you set${CL}\n"
+    echo -e "${INFO}${GN}You can SSH to: ssh root@${VM_IP}${CL}\n"
   else
-    echo -e "${INFO}${YW}Root login is disabled. Use ubuntu user or configure SSH keys${CL}\n"
+    echo -e "${INFO}${YW}Root login disabled. Use 'ubuntu' user or configure SSH keys${CL}\n"
   fi
 fi
 post_update_to_api "done" "none"
