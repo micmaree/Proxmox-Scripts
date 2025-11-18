@@ -296,30 +296,29 @@ function advanced_settings() {
     exit-script
   fi
 
-  # Calculate network range based on CIDR
-  IFS='.' read -r i1 i2 i3 i4 <<< "$BRIDGE_IP"
+  # Calculate network range using Python (avoids bash arithmetic overflow)
+  IP_RANGE=$(python3 <<EOF
+import ipaddress
+network = ipaddress.IPv4Network('${BRIDGE_IP}/${BRIDGE_CIDR}', strict=False)
+for ip in network.hosts():
+    print(ip)
+EOF
+)
 
-  # Calculate subnet mask
-  MASK=$((0xFFFFFFFF << (32 - BRIDGE_CIDR)))
-  NETWORK=$(( (i1 << 24) + (i2 << 16) + (i3 << 8) + i4 ))
-  NETWORK=$((NETWORK & MASK))
-  BROADCAST=$((NETWORK + (0xFFFFFFFF >> BRIDGE_CIDR)))
-
-  # Get first and last usable IP
-  FIRST_IP=$((NETWORK + 1))
-  LAST_IP=$((BROADCAST - 1))
-
-  # Convert to readable IPs
-  NETWORK_ADDR="$(( (NETWORK >> 24) & 0xFF )).$(( (NETWORK >> 16) & 0xFF )).$(( (NETWORK >> 8) & 0xFF )).$(( NETWORK & 0xFF ))"
+  # Get gateway
   GATEWAY=$(ip route | grep "default" | grep $BRG | awk '{print $3}')
-  [ -z "$GATEWAY" ] && GATEWAY="$(( (FIRST_IP >> 24) & 0xFF )).$(( (FIRST_IP >> 16) & 0xFF )).$(( (FIRST_IP >> 8) & 0xFF )).$(( FIRST_IP & 0xFF ))"
+  [ -z "$GATEWAY" ] && GATEWAY="${BRIDGE_IP}"
+
+  # Get network address for display
+  NETWORK_ADDR=$(python3 -c "import ipaddress; print(ipaddress.IPv4Network('${BRIDGE_IP}/${BRIDGE_CIDR}', strict=False).network_address)")
 
   # Generate available IPs list
   AVAILABLE_IPS=()
   IP_COUNT=0
 
-  for ip_num in $(seq $FIRST_IP $LAST_IP); do
-    TEST_IP="$(( (ip_num >> 24) & 0xFF )).$(( (ip_num >> 16) & 0xFF )).$(( (ip_num >> 8) & 0xFF )).$(( ip_num & 0xFF ))"
+  while IFS= read -r TEST_IP; do
+    # Skip empty lines
+    [ -z "$TEST_IP" ] && continue
 
     # Skip gateway
     [ "$TEST_IP" = "$GATEWAY" ] && continue
@@ -329,7 +328,7 @@ function advanced_settings() {
       AVAILABLE_IPS+=("$TEST_IP" "Available" "OFF")
       IP_COUNT=$((IP_COUNT + 1))
     fi
-  done
+  done <<< "$IP_RANGE"
 
   echo -e "${CM}${GN}Found ${IP_COUNT} available IPs in ${NETWORK_ADDR}/${BRIDGE_CIDR}${CL}"
 
