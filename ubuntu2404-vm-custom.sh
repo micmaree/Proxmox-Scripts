@@ -280,10 +280,14 @@ function advanced_settings() {
     exit-script
   fi
 
-  # Get available IPs from Proxmox
-  echo -e "${INFO}${YW}Checking available IPs from Proxmox...${CL}"
+  # Get available IPs from Proxmox configs
+  echo -e "${INFO}${YW}Reading Proxmox VM/CT configurations...${CL}"
 
-  # Get bridge IP and subnet
+  # Get all used IPs from Proxmox VMs and CTs configs
+  USED_IPS=$(grep -rh "ipconfig0\|ip=" /etc/pve/qemu-server/*.conf /etc/pve/lxc/*.conf 2>/dev/null | \
+    grep -oP 'ip=\K\d+\.\d+\.\d+\.\d+' | sort -u)
+
+  # Get bridge network info
   BRIDGE_IP=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
   BRIDGE_CIDR=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
 
@@ -292,39 +296,52 @@ function advanced_settings() {
     exit-script
   fi
 
-  # Calculate network range
-  NETWORK_PREFIX=$(echo $BRIDGE_IP | cut -d'.' -f1-3)
+  # Calculate network range based on CIDR
+  IFS='.' read -r i1 i2 i3 i4 <<< "$BRIDGE_IP"
+
+  # Calculate subnet mask
+  MASK=$((0xFFFFFFFF << (32 - BRIDGE_CIDR)))
+  NETWORK=$(( (i1 << 24) + (i2 << 16) + (i3 << 8) + i4 ))
+  NETWORK=$((NETWORK & MASK))
+  BROADCAST=$((NETWORK + (0xFFFFFFFF >> BRIDGE_CIDR)))
+
+  # Get first and last usable IP
+  FIRST_IP=$((NETWORK + 1))
+  LAST_IP=$((BROADCAST - 1))
+
+  # Convert to readable IPs
+  NETWORK_ADDR="$(( (NETWORK >> 24) & 0xFF )).$(( (NETWORK >> 16) & 0xFF )).$(( (NETWORK >> 8) & 0xFF )).$(( NETWORK & 0xFF ))"
   GATEWAY=$(ip route | grep "default" | grep $BRG | awk '{print $3}')
-  [ -z "$GATEWAY" ] && GATEWAY="${NETWORK_PREFIX}.1"
+  [ -z "$GATEWAY" ] && GATEWAY="$(( (FIRST_IP >> 24) & 0xFF )).$(( (FIRST_IP >> 16) & 0xFF )).$(( (FIRST_IP >> 8) & 0xFF )).$(( FIRST_IP & 0xFF ))"
 
-  # Get all used IPs from Proxmox VMs and CTs
-  USED_IPS=$(grep -rh "ip=" /etc/pve/qemu-server/*.conf /etc/pve/lxc/*.conf 2>/dev/null | grep -oP '\d+\.\d+\.\d+\.\d+' | sort -u)
-
-  # Generate list of available IPs (only those NOT used in Proxmox)
+  # Generate available IPs list
   AVAILABLE_IPS=()
   IP_COUNT=0
 
-  for i in {10..254}; do
-    TEST_IP="${NETWORK_PREFIX}.${i}"
+  for ip_num in $(seq $FIRST_IP $LAST_IP); do
+    TEST_IP="$(( (ip_num >> 24) & 0xFF )).$(( (ip_num >> 16) & 0xFF )).$(( (ip_num >> 8) & 0xFF )).$(( ip_num & 0xFF ))"
 
-    # Check if IP is NOT in used list
+    # Skip gateway
+    [ "$TEST_IP" = "$GATEWAY" ] && continue
+
+    # Check if NOT used in Proxmox
     if ! echo "$USED_IPS" | grep -q "^${TEST_IP}$"; then
-      AVAILABLE_IPS+=("$TEST_IP" "Not assigned" "OFF")
+      AVAILABLE_IPS+=("$TEST_IP" "Available" "OFF")
       IP_COUNT=$((IP_COUNT + 1))
     fi
   done
 
-  echo -e "${CM}${GN}Found ${IP_COUNT} unassigned IPs in ${NETWORK_PREFIX}.0/${BRIDGE_CIDR}${CL}"
+  echo -e "${CM}${GN}Found ${IP_COUNT} available IPs in ${NETWORK_ADDR}/${BRIDGE_CIDR}${CL}"
 
-  if [ ${#AVAILABLE_IPS[@]} -eq 0 ]; then
-    whiptail --backtitle "Proxmox VE Helper Scripts" --title "ERROR" --msgbox "No available IPs found in Proxmox!\n\nAll IPs from ${NETWORK_PREFIX}.10 to .254 are assigned." 10 58
+  if [ $IP_COUNT -eq 0 ]; then
+    whiptail --backtitle "Proxmox VE Helper Scripts" --title "ERROR" --msgbox "No available IPs in subnet ${NETWORK_ADDR}/${BRIDGE_CIDR}!\n\nAll IPs are assigned to VMs/CTs." 10 58
     exit-script
   fi
 
   # Show IP selection menu
   SELECTED_IP=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT IP ADDRESS" --radiolist \
-    "Choose an IP for VM (${IP_COUNT} available):\n\nNetwork: ${NETWORK_PREFIX}.0/${BRIDGE_CIDR}\nGateway: ${GATEWAY}\n" \
-    20 60 10 \
+    "Select IP for VM (${IP_COUNT} available):\n\nSubnet: ${NETWORK_ADDR}/${BRIDGE_CIDR}\nGateway: ${GATEWAY}\n" \
+    20 65 10 \
     "${AVAILABLE_IPS[@]}" 3>&1 1>&2 2>&3)
 
   if [ -z "$SELECTED_IP" ]; then
