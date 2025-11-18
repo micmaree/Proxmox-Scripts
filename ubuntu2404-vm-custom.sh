@@ -280,98 +280,37 @@ function advanced_settings() {
     exit-script
   fi
 
-  # Get available IPs from Proxmox configs
-  echo -e "${INFO}${YW}Reading Proxmox VM/CT configurations...${CL}"
-
-  # Get all used IPs from Proxmox VMs and CTs configs
-  USED_IPS=$(grep -rh "ipconfig0\|ip=" /etc/pve/qemu-server/*.conf /etc/pve/lxc/*.conf 2>/dev/null | \
-    grep -oP 'ip=\K\d+\.\d+\.\d+\.\d+' | sort -u)
-
-  # Get bridge network info - try multiple methods
-  # Method 1: Get from ip addr show (best)
-  BRIDGE_NET=$(ip -4 addr show $BRG 2>/dev/null | grep -oP 'inet\s+\K\d+(\.\d+){3}/\d+' | head -1)
-
-  if [ -z "$BRIDGE_NET" ]; then
-    # Method 2: Check network config files
-    BRIDGE_NET=$(grep -r "address" /etc/network/interfaces /etc/netplan/*.yaml 2>/dev/null | grep -oP '\d+(\.\d+){3}/\d+' | head -1)
-  fi
-
-  if [ -z "$BRIDGE_NET" ]; then
-    echo -e "${CROSS}${RD}Could not detect network configuration on bridge $BRG${CL}"
-    echo -e "${INFO}${YW}Please enter network manually:${CL}"
-
-    # Ask user for network info
-    if MANUAL_NET=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Enter bridge network (IP/CIDR)\nExample: 192.168.1.1/24" 10 58 "" --title "NETWORK CONFIGURATION" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-      BRIDGE_NET="$MANUAL_NET"
-    else
+  # Ask for IP address manually
+  if VM_IP=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Enter VM IP address\nExample: 192.168.1.100" 10 58 "" --title "VM IP ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if [ -z "$VM_IP" ]; then
+      whiptail --backtitle "Proxmox VE Helper Scripts" --title "ERROR" --msgbox "IP address cannot be empty!" 8 58
       exit-script
     fi
-  fi
-
-  BRIDGE_IP=$(echo "$BRIDGE_NET" | cut -d'/' -f1)
-  BRIDGE_CIDR=$(echo "$BRIDGE_NET" | cut -d'/' -f2)
-
-  if [ -z "$BRIDGE_IP" ] || [ -z "$BRIDGE_CIDR" ]; then
-    echo -e "${CROSS}${RD}Invalid network configuration: ${BRIDGE_NET}${CL}"
+    echo -e "${GATEWAY}${BOLD}${DGN}VM IP: ${BGN}${VM_IP}${CL}"
+  else
     exit-script
   fi
 
-  echo -e "${INFO}${YW}Detected network: ${BRIDGE_IP}/${BRIDGE_CIDR}${CL}"
-
-  # Calculate network range using Python (avoids bash arithmetic overflow)
-  IP_RANGE=$(python3 <<EOF
-import ipaddress
-network = ipaddress.IPv4Network('${BRIDGE_IP}/${BRIDGE_CIDR}', strict=False)
-for ip in network.hosts():
-    print(ip)
-EOF
-)
-
-  # Get gateway
-  GATEWAY=$(ip route | grep "default" | grep $BRG | awk '{print $3}')
-  [ -z "$GATEWAY" ] && GATEWAY="${BRIDGE_IP}"
-
-  # Get network address for display
-  NETWORK_ADDR=$(python3 -c "import ipaddress; print(ipaddress.IPv4Network('${BRIDGE_IP}/${BRIDGE_CIDR}', strict=False).network_address)")
-
-  # Generate available IPs list
-  AVAILABLE_IPS=()
-  IP_COUNT=0
-
-  while IFS= read -r TEST_IP; do
-    # Skip empty lines
-    [ -z "$TEST_IP" ] && continue
-
-    # Skip gateway
-    [ "$TEST_IP" = "$GATEWAY" ] && continue
-
-    # Check if NOT used in Proxmox
-    if ! echo "$USED_IPS" | grep -q "^${TEST_IP}$"; then
-      AVAILABLE_IPS+=("$TEST_IP" "Available" "OFF")
-      IP_COUNT=$((IP_COUNT + 1))
+  # Ask for Gateway manually
+  if VM_GATEWAY=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Enter Gateway IP\nExample: 192.168.1.1" 10 58 "" --title "GATEWAY IP" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if [ -z "$VM_GATEWAY" ]; then
+      whiptail --backtitle "Proxmox VE Helper Scripts" --title "ERROR" --msgbox "Gateway cannot be empty!" 8 58
+      exit-script
     fi
-  done <<< "$IP_RANGE"
-
-  echo -e "${CM}${GN}Found ${IP_COUNT} available IPs in ${NETWORK_ADDR}/${BRIDGE_CIDR}${CL}"
-
-  if [ $IP_COUNT -eq 0 ]; then
-    whiptail --backtitle "Proxmox VE Helper Scripts" --title "ERROR" --msgbox "No available IPs in subnet ${NETWORK_ADDR}/${BRIDGE_CIDR}!\n\nAll IPs are assigned to VMs/CTs." 10 58
+    echo -e "${GATEWAY}${BOLD}${DGN}Gateway: ${BGN}${VM_GATEWAY}${CL}"
+  else
     exit-script
   fi
 
-  # Show IP selection menu
-  SELECTED_IP=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT IP ADDRESS" --radiolist \
-    "Select IP for VM (${IP_COUNT} available):\n\nSubnet: ${NETWORK_ADDR}/${BRIDGE_CIDR}\nGateway: ${GATEWAY}\n" \
-    20 65 10 \
-    "${AVAILABLE_IPS[@]}" 3>&1 1>&2 2>&3)
-
-  if [ -z "$SELECTED_IP" ]; then
+  # Ask for CIDR (subnet mask)
+  if VM_CIDR=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Enter subnet mask (CIDR)\nExample: 24 for /24 (255.255.255.0)" 10 58 "24" --title "SUBNET MASK" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if [ -z "$VM_CIDR" ]; then
+      VM_CIDR="24"
+    fi
+    echo -e "${GATEWAY}${BOLD}${DGN}Subnet: ${BGN}/${VM_CIDR}${CL}"
+  else
     exit-script
   fi
-
-  VM_IP="$SELECTED_IP"
-  VM_GATEWAY="$GATEWAY"
-  VM_CIDR="$BRIDGE_CIDR"
 
   echo -e "${GATEWAY}${BOLD}${DGN}IP Address: ${BGN}${VM_IP}/${VM_CIDR}${CL}"
   echo -e "${GATEWAY}${BOLD}${DGN}Gateway: ${BGN}${VM_GATEWAY}${CL}"
