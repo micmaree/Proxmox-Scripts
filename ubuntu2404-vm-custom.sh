@@ -287,14 +287,32 @@ function advanced_settings() {
   USED_IPS=$(grep -rh "ipconfig0\|ip=" /etc/pve/qemu-server/*.conf /etc/pve/lxc/*.conf 2>/dev/null | \
     grep -oP 'ip=\K\d+\.\d+\.\d+\.\d+' | sort -u)
 
-  # Get bridge network info
-  BRIDGE_NET=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
+  # Get bridge network info - try multiple methods
+  # Method 1: Get from ip addr show (best)
+  BRIDGE_NET=$(ip -4 addr show $BRG 2>/dev/null | grep -oP 'inet\s+\K\d+(\.\d+){3}/\d+' | head -1)
+
+  if [ -z "$BRIDGE_NET" ]; then
+    # Method 2: Check network config files
+    BRIDGE_NET=$(grep -r "address" /etc/network/interfaces /etc/netplan/*.yaml 2>/dev/null | grep -oP '\d+(\.\d+){3}/\d+' | head -1)
+  fi
+
+  if [ -z "$BRIDGE_NET" ]; then
+    echo -e "${CROSS}${RD}Could not detect network configuration on bridge $BRG${CL}"
+    echo -e "${INFO}${YW}Please enter network manually:${CL}"
+
+    # Ask user for network info
+    if MANUAL_NET=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Enter bridge network (IP/CIDR)\nExample: 192.168.1.1/24" 10 58 "" --title "NETWORK CONFIGURATION" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+      BRIDGE_NET="$MANUAL_NET"
+    else
+      exit-script
+    fi
+  fi
+
   BRIDGE_IP=$(echo "$BRIDGE_NET" | cut -d'/' -f1)
   BRIDGE_CIDR=$(echo "$BRIDGE_NET" | cut -d'/' -f2)
 
   if [ -z "$BRIDGE_IP" ] || [ -z "$BRIDGE_CIDR" ]; then
-    echo -e "${CROSS}${RD}Could not detect network on bridge $BRG${CL}"
-    echo -e "${CROSS}${RD}Bridge IP: ${BRIDGE_IP}, CIDR: ${BRIDGE_CIDR}${CL}"
+    echo -e "${CROSS}${RD}Invalid network configuration: ${BRIDGE_NET}${CL}"
     exit-script
   fi
 
