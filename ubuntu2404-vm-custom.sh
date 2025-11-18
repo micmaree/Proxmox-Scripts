@@ -288,13 +288,17 @@ function advanced_settings() {
     grep -oP 'ip=\K\d+\.\d+\.\d+\.\d+' | sort -u)
 
   # Get bridge network info
-  BRIDGE_IP=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-  BRIDGE_CIDR=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
+  BRIDGE_NET=$(ip -4 addr show $BRG | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
+  BRIDGE_IP=$(echo "$BRIDGE_NET" | cut -d'/' -f1)
+  BRIDGE_CIDR=$(echo "$BRIDGE_NET" | cut -d'/' -f2)
 
-  if [ -z "$BRIDGE_IP" ]; then
+  if [ -z "$BRIDGE_IP" ] || [ -z "$BRIDGE_CIDR" ]; then
     echo -e "${CROSS}${RD}Could not detect network on bridge $BRG${CL}"
+    echo -e "${CROSS}${RD}Bridge IP: ${BRIDGE_IP}, CIDR: ${BRIDGE_CIDR}${CL}"
     exit-script
   fi
+
+  echo -e "${INFO}${YW}Detected network: ${BRIDGE_IP}/${BRIDGE_CIDR}${CL}"
 
   # Calculate network range using Python (avoids bash arithmetic overflow)
   IP_RANGE=$(python3 <<EOF
